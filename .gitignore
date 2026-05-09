@@ -1,0 +1,12 @@
+.env
+.env.local
+.env.*.local
+bin/
+tmp/
+dist/
+coverage.out
+*.test
+*.log
+postgres-data/
+rabbitmq-data/
+
