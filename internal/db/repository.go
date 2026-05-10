@@ -184,3 +184,57 @@ func (s *Store) MarkWebhookProcessed(ctx context.Context, eventKey string) error
 	}
 	return nil
 }
+
+func (s *Store) GetTransactionByID(ctx context.Context, id int64) (Transaction, error) {
+	var tx Transaction
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, bank_account_id, plaid_transaction_id, amount, iso_currency_code,
+			transaction_date, pending, description_ciphertext, description_nonce,
+			description_key_id, description_algorithm, merchant_name, source_environment,
+			category, ml_confidence, categorized_at
+		 FROM transactions WHERE id = $1`,
+		id,
+	).Scan(
+		&tx.ID, &tx.UserID, &tx.BankAccountID, &tx.PlaidTransactionID, &tx.Amount, &tx.ISOCurrencyCode,
+		&tx.TransactionDate, &tx.Pending, &tx.DescriptionCiphertext, &tx.DescriptionNonce,
+		&tx.DescriptionKeyID, &tx.DescriptionAlgorithm, &tx.MerchantName, &tx.SourceEnvironment,
+		&tx.Category, &tx.MLConfidence, &tx.CategorizedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Transaction{}, pgx.ErrNoRows
+	}
+	if err != nil {
+		return Transaction{}, fmt.Errorf("get transaction by id: %w", err)
+	}
+	return tx, nil
+}
+
+func (s *Store) UpdateTransactionCategory(ctx context.Context, id int64, category string, confidence float32) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE transactions
+		    SET category = $2, ml_confidence = $3, categorized_at = now(), updated_at = now()
+		  WHERE id = $1`,
+		id, category, confidence,
+	)
+	if err != nil {
+		return fmt.Errorf("update transaction category: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) StoreArbitrageOpportunity(ctx context.Context, input ArbitrageInput) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO arbitrage_opportunities (
+			user_id, transaction_id, merchant_name, category,
+			current_amount, market_rate, savings_estimate, provider_url
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id`,
+		input.UserID, input.TransactionID, input.MerchantName, input.Category,
+		input.CurrentAmount, input.MarketRate, input.SavingsEstimate, input.ProviderURL,
+	).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("store arbitrage opportunity: %w", err)
+	}
+	return id, nil
+}

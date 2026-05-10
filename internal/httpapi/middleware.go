@@ -1,13 +1,15 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"netflow/internal/auth"
@@ -15,24 +17,26 @@ import (
 
 type contextKey string
 
-const userIDContextKey contextKey = "user_id"
+const (
+	userIDContextKey contextKey = "user_id"
+	authCookieName              = "auth_token"
+)
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "bearer token is required")
+		cookie, err := r.Cookie(authCookieName)
+		if err != nil || cookie.Value == "" {
+			writeError(w, http.StatusUnauthorized, "authentication cookie is required")
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		claims, err := auth.ParseJWT(s.cfg.Auth.JWTSecret, token)
+		claims, err := auth.ParseJWT(s.cfg.Auth.JWTSecret, cookie.Value)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid bearer token")
+			writeError(w, http.StatusUnauthorized, "invalid authentication cookie")
 			return
 		}
 		userID, err := strconv.ParseInt(claims.Subject, 10, 64)
 		if err != nil || userID <= 0 {
-			writeError(w, http.StatusUnauthorized, "invalid bearer token subject")
+			writeError(w, http.StatusUnauthorized, "invalid authentication cookie subject")
 			return
 		}
 		ctx := context.WithValue(r.Context(), userIDContextKey, userID)
@@ -93,4 +97,20 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack lets WebSocket upgrades work through this middleware. Without it,
+// gorilla/websocket fails with "response does not implement http.Hijacker"
+// because the embedded ResponseWriter is hidden by our wrapper type.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("response writer does not support hijacking")
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
