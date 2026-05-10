@@ -55,8 +55,18 @@ func main() {
 	}
 	defer publisher.Close()
 
+	consumer, err := queue.NewConsumerWithRetry(ctx, cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange, time.Second, 30)
+	if err != nil {
+		logger.Error("rabbitmq consumer setup failed", "error", err)
+		os.Exit(1)
+	}
+	defer consumer.Close()
+
+	hub := httpapi.NewHub(logger)
+	go hub.StartConsumer(ctx, consumer)
+
 	plaidClient := plaid.NewClient(cfg.Plaid.BaseURL, cfg.Plaid.ClientID, cfg.Plaid.Secret)
-	api := httpapi.NewServer(cfg, store, encryptor, plaidClient, publisher, logger)
+	api := httpapi.NewServer(cfg, store, encryptor, plaidClient, publisher, hub, logger)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           api.Handler(),

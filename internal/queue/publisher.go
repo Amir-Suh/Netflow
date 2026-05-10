@@ -9,7 +9,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-const TransactionIngestedRoutingKey = "transactions.ingested"
+const (
+	TransactionIngestedRoutingKey   = "transactions.ingested"
+	TransactionCategorizedRoutingKey = "transactions.categorized"
+	TransactionArbitrageRoutingKey   = "transactions.arbitrage"
+	ArbitrageResultRoutingKey        = "transactions.arbitrage.results"
+)
 
 type TransactionEvent struct {
 	EventType         string    `json:"event_type"`
@@ -18,6 +23,29 @@ type TransactionEvent struct {
 	AccountID         int64     `json:"account_id"`
 	SourceEnvironment string    `json:"source_environment"`
 	OccurredAt        time.Time `json:"occurred_at"`
+}
+
+type CategoryEvent struct {
+	EventType     string    `json:"event_type"`
+	TransactionID int64     `json:"transaction_id"`
+	UserID        int64     `json:"user_id"`
+	Category      string    `json:"category"`
+	Confidence    float32   `json:"confidence"`
+	MerchantName  string    `json:"merchant_name"`
+	OccurredAt    time.Time `json:"occurred_at"`
+}
+
+type ArbitrageEvent struct {
+	EventType       string    `json:"event_type"`
+	TransactionID   int64     `json:"transaction_id"`
+	UserID          int64     `json:"user_id"`
+	MerchantName    string    `json:"merchant_name"`
+	Category        string    `json:"category"`
+	CurrentAmount   float64   `json:"current_amount"`
+	MarketRate      *float64  `json:"market_rate,omitempty"`
+	SavingsEstimate *float64  `json:"savings_estimate,omitempty"`
+	ProviderURL     string    `json:"provider_url,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at"`
 }
 
 type Publisher struct {
@@ -83,15 +111,35 @@ func (p *Publisher) Close() {
 	}
 }
 
-func (p *Publisher) PublishTransactionIngested(ctx context.Context, event TransactionEvent) error {
-	body, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal transaction event: %w", err)
-	}
-	return p.channel.PublishWithContext(ctx, p.exchange, TransactionIngestedRoutingKey, false, false, amqp.Publishing{
+func (p *Publisher) publish(ctx context.Context, routingKey string, body []byte) error {
+	return p.channel.PublishWithContext(ctx, p.exchange, routingKey, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Timestamp:    time.Now().UTC(),
 		Body:         body,
 	})
+}
+
+func (p *Publisher) PublishTransactionIngested(ctx context.Context, event TransactionEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal transaction event: %w", err)
+	}
+	return p.publish(ctx, TransactionIngestedRoutingKey, body)
+}
+
+func (p *Publisher) PublishCategorized(ctx context.Context, event CategoryEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal category event: %w", err)
+	}
+	return p.publish(ctx, TransactionCategorizedRoutingKey, body)
+}
+
+func (p *Publisher) PublishArbitrageResult(ctx context.Context, event ArbitrageEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal arbitrage event: %w", err)
+	}
+	return p.publish(ctx, ArbitrageResultRoutingKey, body)
 }

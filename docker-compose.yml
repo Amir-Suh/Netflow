@@ -40,10 +40,15 @@ services:
       - "5672:5672"
       - "15672:15672"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # check_port_connectivity verifies the AMQP listener is accepting
+      # connections, not just that the Erlang VM is running. Without this,
+      # consumers can race and hit "connection refused" against an
+      # otherwise "healthy" broker.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 10s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 12
+      start_period: 20s
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
 
@@ -86,6 +91,50 @@ services:
       retries: 10
     volumes:
       - postgres-replica-data:/bitnami/postgresql
+
+  categorizer-worker:
+    build:
+      context: ./workers/categorizer
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    environment:
+      RABBITMQ_URL: amqp://netflow:netflow@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: netflow.events
+      RABBITMQ_QUEUE: transactions.ingested
+      DATABASE_URL: postgres://netflow:netflow@postgres-primary:5432/netflow?sslmode=disable
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres-primary:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  arbitrage-worker:
+    build:
+      context: ./workers/arbitrage
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    environment:
+      RABBITMQ_URL: amqp://netflow:netflow@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: netflow.events
+      ARBITRAGE_QUEUE: transactions.arbitrage
+      DATABASE_URL: postgres://netflow:netflow@postgres-primary:5432/netflow?sslmode=disable
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres-primary:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
   rabbitmq-data:

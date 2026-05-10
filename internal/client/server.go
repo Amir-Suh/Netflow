@@ -1,13 +1,17 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"path"
 	"strings"
@@ -17,6 +21,7 @@ import (
 type Server struct {
 	cfg        Config
 	httpClient *http.Client
+	proxy      *httputil.ReverseProxy
 	logger     *slog.Logger
 }
 
@@ -24,13 +29,15 @@ func NewServer(cfg Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		logger: logger,
 	}
+	s.proxy = s.newReverseProxy()
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -72,33 +79,30 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// newReverseProxy returns an httputil.ReverseProxy that strips the "/api"
+// prefix and forwards everything else to the upstream API. ReverseProxy
+// natively handles WebSocket upgrades (since Go 1.12), which the previous
+// manual proxy did not.
+func (s *Server) newReverseProxy() *httputil.ReverseProxy {
+	target := s.cfg.APIBaseURL
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			apiPath := strings.TrimPrefix(pr.In.URL.Path, "/api")
+			pr.Out.URL.Path = joinURLPath(target.Path, apiPath)
+			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
+			pr.Out.Host = target.Host
+			pr.Out.Header.Set("X-NetFlow-Client", "docker-go-client")
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			s.logger.Warn("api proxy failed", "error", err, "path", r.URL.Path)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "api is not reachable"})
+		},
+	}
+}
+
 func (s *Server) proxyAPI(w http.ResponseWriter, r *http.Request) {
-	apiPath := strings.TrimPrefix(r.URL.Path, "/api")
-	if apiPath == "" {
-		apiPath = "/"
-	}
-	target := s.apiURL(apiPath, r.URL.RawQuery)
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "api request could not be created"})
-		return
-	}
-	copyHeaders(req.Header, r.Header)
-	req.Header.Set("X-NetFlow-Client", "docker-go-client")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		s.logger.Warn("api proxy failed", "error", err, "path", apiPath)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "api is not reachable"})
-		return
-	}
-	defer resp.Body.Close()
-
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		s.logger.Warn("api proxy response copy failed", "error", err, "path", apiPath)
-	}
+	s.proxy.ServeHTTP(w, r)
 }
 
 func (s *Server) callAPI(ctx context.Context, method, apiPath string, body []byte) (*http.Response, error) {
@@ -138,27 +142,6 @@ func joinURLPath(basePath, apiPath string) string {
 	return joined
 }
 
-func copyHeaders(dst, src http.Header) {
-	for name, values := range src {
-		if isHopByHopHeader(name) {
-			continue
-		}
-		for _, value := range values {
-			dst.Add(name, value)
-		}
-	}
-}
-
-func isHopByHopHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailer", "transfer-encoding", "upgrade":
-		return true
-	default:
-		return false
-	}
-}
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -187,4 +170,20 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack lets httputil.ReverseProxy proxy WebSocket upgrades through this
+// middleware. The embedded ResponseWriter implements http.Hijacker, but our
+// wrapper type hides it from interface assertions unless we forward.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, errors.New("response writer does not support hijacking")
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

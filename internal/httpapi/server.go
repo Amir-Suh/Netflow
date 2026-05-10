@@ -34,16 +34,18 @@ type Server struct {
 	encryptor *nfcrypto.AESGCM
 	plaid     *plaid.Client
 	publisher transactionPublisher
+	hub       *Hub
 	logger    *slog.Logger
 }
 
-func NewServer(cfg config.Config, store *db.Store, encryptor *nfcrypto.AESGCM, plaidClient *plaid.Client, publisher transactionPublisher, logger *slog.Logger) *Server {
+func NewServer(cfg config.Config, store *db.Store, encryptor *nfcrypto.AESGCM, plaidClient *plaid.Client, publisher transactionPublisher, hub *Hub, logger *slog.Logger) *Server {
 	return &Server{
 		cfg:       cfg,
 		store:     store,
 		encryptor: encryptor,
 		plaid:     plaidClient,
 		publisher: publisher,
+		hub:       hub,
 		logger:    logger,
 	}
 }
@@ -54,11 +56,40 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("POST /auth/register", s.register)
 	mux.HandleFunc("POST /auth/login", s.login)
+	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.Handle("POST /plaid/link-token", s.requireAuth(http.HandlerFunc(s.createLinkToken)))
 	mux.Handle("POST /plaid/exchange-public-token", s.requireAuth(http.HandlerFunc(s.exchangePublicToken)))
 	mux.Handle("POST /plaid/sync", s.requireAuth(http.HandlerFunc(s.syncPlaidItem)))
 	mux.HandleFunc("POST /plaid/webhook", s.plaidWebhook)
+	mux.Handle("GET /ws", s.requireAuth(http.HandlerFunc(s.handleWebSocket)))
 	return s.recoverPanic(s.logRequests(mux))
+}
+
+func (s *Server) setAuthCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(s.cfg.Auth.JWTTTL.Seconds()),
+	})
+}
+
+func (s *Server) clearAuthCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
+func (s *Server) logout(w http.ResponseWriter, _ *http.Request) {
+	s.clearAuthCookie(w)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +138,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "token creation failed")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "user_id": user.ID, "email": user.Email})
+	s.setAuthCookie(w, token)
+	writeJSON(w, http.StatusCreated, map[string]any{"user_id": user.ID, "email": user.Email})
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +167,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "token creation failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user_id": user.ID, "email": user.Email})
+	s.setAuthCookie(w, token)
+	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "email": user.Email})
 }
 
 func (s *Server) createLinkToken(w http.ResponseWriter, r *http.Request) {
