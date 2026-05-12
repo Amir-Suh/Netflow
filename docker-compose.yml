@@ -136,6 +136,27 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  quant-worker:
+    build:
+      context: ./workers/quant
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    environment:
+      RABBITMQ_URL: amqp://netflow:netflow@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: netflow.events
+      DATABASE_URL: postgres://netflow:netflow@postgres-primary:5432/netflow?sslmode=disable
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres-primary:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   rabbitmq-data:
   postgres-primary-data:

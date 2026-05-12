@@ -132,6 +132,13 @@ const indexHTML = `<!doctype html>
     }
     .dot.ok { background: var(--ok); }
     .dot.bad { background: var(--bad); }
+    .note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 650;
+    }
     pre {
       margin: 0;
       min-height: 220px;
@@ -187,9 +194,6 @@ const indexHTML = `<!doctype html>
             <button id="register">Register</button>
             <button class="secondary" id="login">Login</button>
           </div>
-          <label>Bearer token
-            <textarea id="token" spellcheck="false"></textarea>
-          </label>
         </div>
       </section>
       <section>
@@ -212,6 +216,19 @@ const indexHTML = `<!doctype html>
           </div>
         </div>
       </section>
+      <section>
+        <h2>Quant Engine</h2>
+        <div class="stack">
+          <p class="note">Educational projections only. Not financial advice.</p>
+          <button id="seed-cycle-3">Seed Cycle 3</button>
+          <div class="toolbar">
+            <button id="run-debt">Debt</button>
+            <button id="run-wealth">Wealth</button>
+            <button id="run-portfolio">Portfolio</button>
+          </div>
+          <button class="secondary" id="refresh-quant">Refresh Results</button>
+        </div>
+      </section>
     </div>
     <div class="stack">
       <section>
@@ -222,12 +239,22 @@ const indexHTML = `<!doctype html>
         <h2>Response</h2>
         <pre id="output">{}</pre>
       </section>
+      <section>
+        <h2>Latest Quant Results</h2>
+        <pre id="quant-summary">{}</pre>
+      </section>
+      <section>
+        <h2>Quant Events</h2>
+        <pre id="quant-events">[]</pre>
+      </section>
     </div>
   </main>
   <script>
     const state = {
       linkToken: "",
       linkHandler: null,
+      ws: null,
+      quantEvents: [],
       samples: [12, 28, 18, 45, 32, 66, 42, 74, 52, 88, 64, 96]
     };
     const els = {
@@ -237,18 +264,21 @@ const indexHTML = `<!doctype html>
       readyDot: document.getElementById("api-ready-dot"),
       email: document.getElementById("email"),
       password: document.getElementById("password"),
-      token: document.getElementById("token"),
       publicToken: document.getElementById("public-token"),
       itemID: document.getElementById("item-id"),
       output: document.getElementById("output"),
+      quantSummary: document.getElementById("quant-summary"),
+      quantEvents: document.getElementById("quant-events"),
       openLink: document.getElementById("open-link"),
       canvas: document.getElementById("activity-canvas")
     };
 
-    els.token.value = localStorage.getItem("netflow.token") || "";
-
     function setOutput(value) {
       els.output.textContent = JSON.stringify(value, null, 2);
+    }
+
+    function setQuantSummary(value) {
+      els.quantSummary.textContent = JSON.stringify(value, null, 2);
     }
 
     function setIndicator(dot, label, ok, text) {
@@ -260,10 +290,6 @@ const indexHTML = `<!doctype html>
       const headers = Object.assign({"Accept": "application/json"}, options.headers || {});
       if (options.body && !headers["Content-Type"]) {
         headers["Content-Type"] = "application/json";
-      }
-      const token = els.token.value.trim();
-      if (token) {
-        headers.Authorization = "Bearer " + token;
       }
       const response = await fetch("/api" + path, Object.assign({}, options, {headers}));
       const text = await response.text();
@@ -297,9 +323,8 @@ const indexHTML = `<!doctype html>
         method: "POST",
         body: JSON.stringify({email: els.email.value.trim(), password: els.password.value})
       });
-      els.token.value = data.token || "";
-      localStorage.setItem("netflow.token", els.token.value);
       setOutput(data);
+      connectWebSocket();
     }
 
     async function createLinkToken() {
@@ -358,6 +383,58 @@ const indexHTML = `<!doctype html>
       setOutput(data);
     }
 
+    async function seedCycle3() {
+      const data = await api("/demo/seed-cycle-3", {method: "POST", body: "{}"});
+      setOutput(data);
+      await refreshQuant();
+    }
+
+    async function runDebt() {
+      const data = await api("/quant/debt/optimize", {method: "POST", body: JSON.stringify({preference: "lowest_interest"})});
+      setOutput(data);
+    }
+
+    async function runWealth() {
+      const data = await api("/quant/wealth/simulate", {method: "POST", body: JSON.stringify({assumption_method: "demo_static"})});
+      setOutput(data);
+    }
+
+    async function runPortfolio() {
+      const data = await api("/quant/portfolio/optimize", {method: "POST", body: JSON.stringify({assumption_method: "demo_static"})});
+      setOutput(data);
+    }
+
+    async function refreshQuant() {
+      const result = {};
+      for (const item of [
+        ["debt", "/quant/debt/runs/latest"],
+        ["wealth", "/quant/wealth/runs/latest"],
+        ["portfolio", "/quant/portfolio/runs/latest"]
+      ]) {
+        try {
+          result[item[0]] = await api(item[1], {method: "GET"});
+        } catch (err) {
+          result[item[0]] = err.response || {error: err.message};
+        }
+      }
+      setQuantSummary(result);
+    }
+
+    function connectWebSocket() {
+      if (state.ws && state.ws.readyState < 2) return;
+      const scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
+      state.ws = new WebSocket(scheme + window.location.host + "/api/ws");
+      state.ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if ((data.event_type || "").startsWith("quant.")) {
+          state.quantEvents.unshift(data);
+          state.quantEvents = state.quantEvents.slice(0, 12);
+          els.quantEvents.textContent = JSON.stringify(state.quantEvents, null, 2);
+          refreshQuant().catch(() => {});
+        }
+      };
+    }
+
     function drawActivity() {
       const ctx = els.canvas.getContext("2d");
       const w = els.canvas.width;
@@ -393,7 +470,12 @@ const indexHTML = `<!doctype html>
     document.getElementById("exchange-token").addEventListener("click", () => exchangeToken().catch(err => setOutput(err.response || {error: err.message})));
     document.getElementById("sync-item").addEventListener("click", () => syncItem().catch(err => setOutput(err.response || {error: err.message})));
     document.getElementById("mock-webhook").addEventListener("click", () => mockWebhook().catch(err => setOutput(err.response || {error: err.message})));
-    window.addEventListener("load", () => { updateLinkButton(); refreshStatus(); drawActivity(); });
+    document.getElementById("seed-cycle-3").addEventListener("click", () => seedCycle3().catch(err => setOutput(err.response || {error: err.message})));
+    document.getElementById("run-debt").addEventListener("click", () => runDebt().catch(err => setOutput(err.response || {error: err.message})));
+    document.getElementById("run-wealth").addEventListener("click", () => runWealth().catch(err => setOutput(err.response || {error: err.message})));
+    document.getElementById("run-portfolio").addEventListener("click", () => runPortfolio().catch(err => setOutput(err.response || {error: err.message})));
+    document.getElementById("refresh-quant").addEventListener("click", () => refreshQuant().catch(err => setOutput(err.response || {error: err.message})));
+    window.addEventListener("load", () => { updateLinkButton(); refreshStatus(); refreshQuant(); drawActivity(); connectWebSocket(); });
     window.addEventListener("resize", drawActivity);
     setInterval(updateLinkButton, 800);
   </script>

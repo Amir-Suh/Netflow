@@ -10,10 +10,20 @@ import (
 )
 
 const (
-	TransactionIngestedRoutingKey   = "transactions.ingested"
-	TransactionCategorizedRoutingKey = "transactions.categorized"
-	TransactionArbitrageRoutingKey   = "transactions.arbitrage"
-	ArbitrageResultRoutingKey        = "transactions.arbitrage.results"
+	TransactionIngestedRoutingKey     = "transactions.ingested"
+	TransactionCategorizedRoutingKey  = "transactions.categorized"
+	TransactionArbitrageRoutingKey    = "transactions.arbitrage"
+	ArbitrageResultRoutingKey         = "transactions.arbitrage.results"
+	QuantDebtRequestedRoutingKey      = "quant.debt.requested"
+	QuantWealthRequestedRoutingKey    = "quant.wealth.requested"
+	QuantPortfolioRequestedRoutingKey = "quant.portfolio.requested"
+	QuantDebtCompletedRoutingKey      = "quant.debt.completed"
+	QuantWealthCompletedRoutingKey    = "quant.wealth.completed"
+	QuantPortfolioCompletedRoutingKey = "quant.portfolio.completed"
+	QuantErrorRoutingKey              = "quant.error"
+	QuantDebtQueueName                = "quant.debt"
+	QuantWealthQueueName              = "quant.wealth"
+	QuantPortfolioQueueName           = "quant.portfolio"
 )
 
 type TransactionEvent struct {
@@ -48,6 +58,14 @@ type ArbitrageEvent struct {
 	OccurredAt      time.Time `json:"occurred_at"`
 }
 
+type QuantJobEvent struct {
+	EventType  string    `json:"event_type"`
+	RunID      int64     `json:"run_id"`
+	UserID     int64     `json:"user_id"`
+	JobType    string    `json:"job_type"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
 type Publisher struct {
 	conn     *amqp.Connection
 	channel  *amqp.Channel
@@ -78,6 +96,25 @@ func NewPublisher(url, exchange, queueName string) (*Publisher, error) {
 		channel.Close()
 		conn.Close()
 		return nil, fmt.Errorf("bind queue: %w", err)
+	}
+	for _, binding := range []struct {
+		queueName  string
+		routingKey string
+	}{
+		{QuantDebtQueueName, QuantDebtRequestedRoutingKey},
+		{QuantWealthQueueName, QuantWealthRequestedRoutingKey},
+		{QuantPortfolioQueueName, QuantPortfolioRequestedRoutingKey},
+	} {
+		if _, err := channel.QueueDeclare(binding.queueName, true, false, false, false, nil); err != nil {
+			channel.Close()
+			conn.Close()
+			return nil, fmt.Errorf("declare queue %s: %w", binding.queueName, err)
+		}
+		if err := channel.QueueBind(binding.queueName, binding.routingKey, exchange, false, nil); err != nil {
+			channel.Close()
+			conn.Close()
+			return nil, fmt.Errorf("bind queue %s: %w", binding.queueName, err)
+		}
 	}
 	return &Publisher{conn: conn, channel: channel, exchange: exchange}, nil
 }
@@ -142,4 +179,24 @@ func (p *Publisher) PublishArbitrageResult(ctx context.Context, event ArbitrageE
 		return fmt.Errorf("marshal arbitrage event: %w", err)
 	}
 	return p.publish(ctx, ArbitrageResultRoutingKey, body)
+}
+
+func (p *Publisher) PublishQuantJob(ctx context.Context, event QuantJobEvent) error {
+	routingKey := ""
+	switch event.JobType {
+	case "debt":
+		routingKey = QuantDebtRequestedRoutingKey
+	case "wealth":
+		routingKey = QuantWealthRequestedRoutingKey
+	case "portfolio":
+		routingKey = QuantPortfolioRequestedRoutingKey
+	default:
+		return fmt.Errorf("unsupported quant job type %q", event.JobType)
+	}
+	event.EventType = routingKey
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal quant job event: %w", err)
+	}
+	return p.publish(ctx, routingKey, body)
 }
