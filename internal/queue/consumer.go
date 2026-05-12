@@ -12,6 +12,7 @@ import (
 const (
 	categorizedQueueName     = "netflow.api.categorized"
 	arbitrageResultQueueName = "netflow.api.arbitrage.results"
+	quantCompletedQueueName  = "netflow.api.quant.completed"
 )
 
 // WorkerEvent is a categorization or arbitrage result delivered from a Python
@@ -21,6 +22,9 @@ type WorkerEvent struct {
 	EventType     string          `json:"event_type"`
 	UserID        int64           `json:"user_id"`
 	TransactionID int64           `json:"transaction_id"`
+	RunID         int64           `json:"run_id"`
+	RunKind       string          `json:"run_kind"`
+	Status        string          `json:"status"`
 	OccurredAt    time.Time       `json:"occurred_at"`
 	Payload       json.RawMessage `json:"payload"`
 }
@@ -59,6 +63,18 @@ func NewConsumer(url, exchange string) (*Consumer, error) {
 			channel.Close()
 			conn.Close()
 			return nil, fmt.Errorf("consumer bind queue %s: %w", queueName, err)
+		}
+	}
+	if _, err := channel.QueueDeclare(quantCompletedQueueName, true, false, false, false, nil); err != nil {
+		channel.Close()
+		conn.Close()
+		return nil, fmt.Errorf("consumer declare queue %s: %w", quantCompletedQueueName, err)
+	}
+	for _, routingKey := range []string{"quant.*.completed", QuantErrorRoutingKey} {
+		if err := channel.QueueBind(quantCompletedQueueName, routingKey, exchange, false, nil); err != nil {
+			channel.Close()
+			conn.Close()
+			return nil, fmt.Errorf("consumer bind queue %s: %w", quantCompletedQueueName, err)
 		}
 	}
 	return &Consumer{conn: conn, channel: channel, exchange: exchange}, nil
@@ -104,6 +120,10 @@ func (c *Consumer) Consume(ctx context.Context, events chan<- WorkerEvent) error
 	if err != nil {
 		return fmt.Errorf("consume arbitrage results: %w", err)
 	}
+	quant, err := c.channel.Consume(quantCompletedQueueName, "", false, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("consume quant completion: %w", err)
+	}
 
 	for {
 		select {
@@ -119,6 +139,11 @@ func (c *Consumer) Consume(ctx context.Context, events chan<- WorkerEvent) error
 				return fmt.Errorf("arbitrage channel closed")
 			}
 			c.dispatch(ctx, events, msg, "transactions.arbitrage.results")
+		case msg, ok := <-quant:
+			if !ok {
+				return fmt.Errorf("quant completion channel closed")
+			}
+			c.dispatch(ctx, events, msg, msg.RoutingKey)
 		}
 	}
 }
@@ -127,6 +152,9 @@ func (c *Consumer) dispatch(ctx context.Context, events chan<- WorkerEvent, msg 
 	var inner struct {
 		TransactionID int64     `json:"transaction_id"`
 		UserID        int64     `json:"user_id"`
+		RunID         int64     `json:"run_id"`
+		RunKind       string    `json:"run_kind"`
+		Status        string    `json:"status"`
 		OccurredAt    time.Time `json:"occurred_at"`
 	}
 	_ = json.Unmarshal(msg.Body, &inner)
@@ -135,6 +163,9 @@ func (c *Consumer) dispatch(ctx context.Context, events chan<- WorkerEvent, msg 
 		EventType:     eventType,
 		UserID:        inner.UserID,
 		TransactionID: inner.TransactionID,
+		RunID:         inner.RunID,
+		RunKind:       inner.RunKind,
+		Status:        inner.Status,
 		OccurredAt:    inner.OccurredAt,
 		Payload:       json.RawMessage(msg.Body),
 	}

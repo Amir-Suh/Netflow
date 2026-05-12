@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +22,7 @@ type Config struct {
 	Auth               AuthConfig
 	Crypto             CryptoConfig
 	Plaid              PlaidConfig
+	Demo               DemoConfig
 }
 
 type RabbitMQConfig struct {
@@ -45,6 +47,10 @@ type PlaidConfig struct {
 	ClientID   string
 	Secret     string
 	WebhookURL string
+}
+
+type DemoConfig struct {
+	SeedEnabled bool
 }
 
 func Load() (Config, error) {
@@ -90,6 +96,11 @@ func Load() (Config, error) {
 	if cfg.Plaid.WebhookURL == "" {
 		cfg.Plaid.WebhookURL = cfg.PublicBaseURL + "/plaid/webhook"
 	}
+	demoSeedEnabled, err := strconv.ParseBool(getenv("NETFLOW_DEMO_SEED_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse NETFLOW_DEMO_SEED_ENABLED: %w", err)
+	}
+	cfg.Demo = DemoConfig{SeedEnabled: demoSeedEnabled}
 
 	if err := validate(cfg); err != nil {
 		return Config{}, err
@@ -136,4 +147,3 @@ func getenv(name, fallback string) string {
 	}
 	return value
 }
-

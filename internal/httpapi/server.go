@@ -18,14 +18,15 @@ import (
 
 	"netflow/internal/auth"
 	"netflow/internal/config"
-	"netflow/internal/db"
 	nfcrypto "netflow/internal/crypto"
+	"netflow/internal/db"
 	"netflow/internal/plaid"
 	"netflow/internal/queue"
 )
 
 type transactionPublisher interface {
 	PublishTransactionIngested(context.Context, queue.TransactionEvent) error
+	PublishQuantJob(context.Context, queue.QuantJobEvent) error
 }
 
 type Server struct {
@@ -61,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /plaid/exchange-public-token", s.requireAuth(http.HandlerFunc(s.exchangePublicToken)))
 	mux.Handle("POST /plaid/sync", s.requireAuth(http.HandlerFunc(s.syncPlaidItem)))
 	mux.HandleFunc("POST /plaid/webhook", s.plaidWebhook)
+	s.registerQuantRoutes(mux)
 	mux.Handle("GET /ws", s.requireAuth(http.HandlerFunc(s.handleWebSocket)))
 	return s.recoverPanic(s.logRequests(mux))
 }
@@ -380,16 +382,16 @@ func (s *Server) syncItemTransactions(ctx context.Context, item db.PlaidItem) (i
 			}
 			stored, err := s.store.UpsertTransaction(ctx, db.TransactionInput{
 				UserID:                item.UserID,
-				BankAccountID:        accountID,
+				BankAccountID:         accountID,
 				PlaidTransactionID:    tx.TransactionID,
 				Amount:                tx.Amount,
 				ISOCurrencyCode:       tx.ISOCurrencyCode,
 				TransactionDate:       transactionDate,
 				Pending:               tx.Pending,
-				DescriptionCiphertext:  encryptedDescription.Ciphertext,
-				DescriptionNonce:       encryptedDescription.Nonce,
-				DescriptionKeyID:       encryptedDescription.KeyID,
-				DescriptionAlgorithm:   encryptedDescription.Algorithm,
+				DescriptionCiphertext: encryptedDescription.Ciphertext,
+				DescriptionNonce:      encryptedDescription.Nonce,
+				DescriptionKeyID:      encryptedDescription.KeyID,
+				DescriptionAlgorithm:  encryptedDescription.Algorithm,
 				MerchantName:          tx.MerchantName,
 				SourceEnvironment:     "sandbox",
 			})
@@ -397,7 +399,7 @@ func (s *Server) syncItemTransactions(ctx context.Context, item db.PlaidItem) (i
 				return total, err
 			}
 			if err := s.publisher.PublishTransactionIngested(ctx, queue.TransactionEvent{
-				EventType:          queue.TransactionIngestedRoutingKey,
+				EventType:         queue.TransactionIngestedRoutingKey,
 				TransactionID:     stored.ID,
 				UserID:            stored.UserID,
 				AccountID:         stored.BankAccountID,

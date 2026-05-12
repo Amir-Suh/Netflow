@@ -27,12 +27,13 @@ Compose loads `.env.example` for local defaults and then applies `.env` override
 
 ## API Flow
 
-- `POST /auth/register` creates a local user and returns a bearer JWT.
-- `POST /auth/login` returns a bearer JWT for an existing user.
+- `POST /auth/register` creates a local user and sets an HTTP-only auth cookie.
+- `POST /auth/login` sets an HTTP-only auth cookie for an existing user.
 - `POST /plaid/link-token` creates a Plaid Sandbox Link token.
 - `POST /plaid/exchange-public-token` stores the encrypted Sandbox access token.
 - `POST /plaid/sync` ingests Sandbox transactions for a linked Item.
 - `POST /plaid/webhook` accepts mock Plaid Sandbox transaction webhooks and routes ingested transaction events to RabbitMQ.
+- Cycle 3 quant routes under `/quant/*` create authenticated async jobs for debt optimization, wealth simulation, and portfolio optimization.
 
 Use Plaid Sandbox Link test credentials:
 

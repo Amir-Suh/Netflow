@@ -74,6 +74,9 @@ func (h *Hub) Broadcast(userID int64, event queue.WorkerEvent) {
 	envelope := map[string]any{
 		"event_type":     event.EventType,
 		"transaction_id": event.TransactionID,
+		"run_id":         event.RunID,
+		"run_kind":       event.RunKind,
+		"status":         event.Status,
 		"occurred_at":    event.OccurredAt,
 		"payload":        event.Payload,
 	}
